@@ -1,0 +1,401 @@
+---
+title: "Multilevel Bayesian model / Generalized linear mixed model"
+author: "Butovens Médé"
+date: "5/8/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# install.packages("tidyverse", "skimr", "dplyr", "brms", "lme4", "tidybayes", "broom", "modelr")
+library(tidyverse)
+library(skimr)
+library(dplyr)
+library(brms)
+library(lme4)
+library(tidybayes)
+library(broom)
+library(modelr)
+#library(performance)
+```
+
+# 1: Multilevel Bayesian Model on ERP data
+## A)
+```{r}
+### Load data 
+# (Use read_tsv because data in tab separated text file)
+ERP_dat <- read_tsv(file.choose()) # choose public_noun_data file
+
+### Skim data
+skim(ERP_dat)
+
+### Plot relationship between cloze and N400 amplitudes 
+ggplot(ERP_dat, aes(x = cloze, y = n400)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "relationship between cloze and N400 amplitudes",
+       x = "cloze in percentage",
+       y = "N400 amplitude in microVolt") +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+### Plot relationship between cloze and N400 amplitudes per lab
+ggplot(ERP_dat, aes(x = cloze, y = n400, group = subject , color = lab)) +
+  geom_point() +
+  facet_wrap(~lab) +
+  geom_smooth(method = "lm", color = "black") +
+  labs(title = "relationship between cloze and N400 amplitudes (per lab)",
+       x = "cloze in percentage",
+       y = "N400 amplitude in microVolt") +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+ 
+```
+
+
+## B)
+* We expect "the amplitude of the EEG is about 100 µV when measured on the scalp, and about 1-2 mV when measured on the surface of the brain" (c.f. [This paper](https://www.bem.fi/book/13/13.htm)), we typically should not expect ERPs to have larger peak-to-peak amplitude than about 200µV when measured at the scalp with an EEG cap. We will use a moderately large vague prior for the intercept. In addition, the change in amplitude from baseline should also not be more than the max amplitude 100µV. Thus our slope will have a prior that is a bit more informative than our intercept. Finally, we may assume some level of noise external (e.g. eye blinks) and internal. We will be less conservative for the prior for the variance.
+
+We can write our model like so:
+
+$$ P400Amplitude_{ij} \sim N(\mu_{ij},\sigma) $$
+$$ u_{ijk} = (\beta_0 + \gamma_{0j} + \zeta_{0i} + \omega_{0k}) + (\beta_1 + \gamma_{1j} + \omega_{1k}) \cdot x_{ijk}$$
+
+ $$\beta_0 \sim N(0,5)$$
+ $$\beta_1 \sim N(0,.25)$$
+ $$\sigma \sim N_+(0,5)$$ 
+$$\begin{pmatrix}
+\gamma_0 \\
+\gamma_1
+\end{pmatrix}\sim N_2\left(\begin{pmatrix}
+0 \\
+0
+\end{pmatrix},\begin{pmatrix}
+\sigma_{\gamma0}^2 & \rho_\gamma\sigma_{\gamma0}\sigma_{\gamma1} \\
+\rho_\gamma\sigma_{\gamma0}\sigma_{\gamma1} & \sigma_{\gamma1}^2
+\end{pmatrix}\right)$$
+
+
+$$\begin{pmatrix}
+\omega_0 \\
+\omega_1
+\end{pmatrix}\sim N_2\left(\begin{pmatrix}
+0 \\
+0
+\end{pmatrix},\begin{pmatrix}
+\sigma_{\omega0}^2 & \rho_\omega\sigma_{\omega0}\sigma_{\omega1} \\
+\rho_\omega\sigma_{\omega0}\sigma_{\omega1} & \sigma_{\omega1}^2
+\end{pmatrix}\right)$$ 
+ 
+$$\zeta_{0i} \sim N(0, \sigma_{\zeta0})$$  
+
+$$\sigma_{\gamma0} \sim N_+(0,5)$$
+$$\sigma_{\gamma1} \sim N_+(0,5)$$
+$$\sigma_{\omega0} \sim N_+(0,2)$$
+$$\sigma_{\omega1} \sim N_+(0,2)$$
+
+$$\sigma_{\zeta0} \sim N_+(0,2)$$
+
+$$\rho \sim LKJ(2)$$
+
+* $i$ = indexes items
+* $j$ = indexes subjects
+* $k$ = indexes labs
+
+
+
+```{r}
+### Change character variables to factor
+ERP_dat_fac <- ERP_dat %>% 
+  mutate(ccloze = scale(cloze, center = T, scale = F),
+         subject = factor(subject),
+         lab = factor(lab))
+
+### Check ERP_dat_fac
+skim(ERP_dat_fac)
+
+### Prior Predictive Simulations
+# Specify 3-level model: Observations nested within subjects nested within labs
+mod_prior <- brm(n400 ~ 1 + ccloze + (1 + ccloze|lab) + (1 + ccloze|lab:subject) + (1|item),
+                # Specify data set 
+               data = ERP_dat_fac,
+               # Specify distribution family of the DV
+               family = gaussian(),
+               # Specify what that we want to sample from prior only
+               sample_prior = "only",
+               # Specify the number of iteration
+               iter = 2000,
+               # Specify the prior of the B0 intercept
+               prior = c(prior(normal(0,5),class = Intercept),
+                         # Specify the prior of the B1 slope
+                         prior(normal(0,.25),class = b),
+                         # Specify the prior of the overall sigma
+                         prior(normal(0,5),class = sigma),
+                         # Specify the prior of the deviation from the overall intercept for subjects (within lab)
+                         prior(normal(0,5), class = sd, coef = Intercept, group = lab:subject),
+                         # Specify the prior of the deviation from the overall slope for subjects (within lab)
+                         prior(normal(0,5), class = sd, coef = ccloze, group = lab:subject),
+                         # Specify the prior of the deviation from the overall intercept for lab
+                         prior(normal(0,2),class = sd,coef = Intercept, group = lab),
+                         # Specify the prior of the deviation from the overall slope for lab
+                         prior(normal(0,2),class = sd,coef = ccloze, group = lab),
+                         # Specify the prior of the deviation from the overall intercept for item
+                         prior(normal(0,2),class = sd,coef = Intercept, group = item),
+                         # Specify the variance/covariance matrix for the multivariate distribution of intercept/slope coef for subjects (within labs)
+                         prior(lkj(2), class = cor, group = lab:subject),
+                         # Specify the variance/covariance matrix for the multivariate distribution of intercept/slope coef for labs
+                         prior(lkj(2),class = cor,group = lab)),
+               file = "mod_prior")
+
+
+### Create fake data for prior predictive check (Did not work when tried to include it in add_predicted_draws function: Got the error: Error in get(sgroup[1], data) : object 'lab' not found)
+# fake_dat <- tibble(ccloze = modelr::seq_range(ERP_dat_fac$ccloze,
+#                                               # sample 100 values across range of previously specified predictor
+#                                               n = 100))
+
+### Get predicted samples to see the range of values the priors will support
+ERP_dat_fac %>%
+  add_predicted_draws(mod_prior, n=20) %>%
+  ggplot() +
+  geom_density(aes(x = .prediction, group = .draw), color = "lightblue")
+
+```
+
+## C)
+```{r}
+### Fit model
+mod1 <- brm(n400 ~ 1 + ccloze + (1 + ccloze|lab) + (1 + ccloze|lab:subject) + (1|item),
+            data = ERP_dat_fac,
+            family = gaussian(),
+            prior = c(prior(normal(0,5),class = Intercept),
+                         prior(normal(0,.25),class = b),
+                         prior(normal(0,5),class = sigma),
+                         prior(normal(0,5), class = sd, coef = Intercept, group = lab:subject),
+                         prior(normal(0,5), class = sd, coef = ccloze, group = lab:subject),
+                         prior(normal(0,2),class = sd,coef = Intercept, group = lab),
+                         prior(normal(0,2),class = sd,coef = ccloze, group = lab),
+                         prior(normal(0,2),class = sd,coef = Intercept, group = item),
+                         prior(lkj(2), class = cor, group = lab:subject),
+                         prior(lkj(2),class = cor,group = lab)),
+            iter = 4000,
+            cores = 4,
+            file = "m1")
+
+```
+ **Note: LKJ used when specifying the prior for the coefficient rho of the multivariate distribution**
+
+```{r}
+### Plot diagnostic plots
+plot(mod1)
+
+
+### Plot posterior
+mcmc_plot(mod1, type = "dens")
+```
+
+
+```{r}
+# Posterior predictive
+pp_check(mod1, type = "dens_overlay", nsamples = 50)
+```
+
+## D)
+```{r}
+### Summary
+summary(mod1)
+
+### Add fitted values to posterior
+ERP_dat_fac %>% 
+  data_grid(ccloze = seq_range(ERP_dat_fac$ccloze, n=20)) %>% 
+  add_fitted_draws(mod1 , n=50, allow_new_levels = T) %>% 
+  ggplot()+
+  geom_point(data = ERP_dat_fac, aes(x = ccloze, y=n400), alpha = 0.5, color = "lightblue")+
+  geom_line(aes(x = ccloze, y=.value, group = .draw), alpha = 0.5)
+```
+
+## E)
+ * The analysis was run using, R version 4.0.2 (2020-06-22) and brms_2.15.0. Discussion of the priors and their choices for this model were discussed above. The results from the posterior distribution of this model shows that the average measurement for n400 when a cloze word is at the mean is 2.94µV, 95% HDI [2.33,3.55]. The average rate of change for one percent increase in "clozeness" leads to an average increase in n400 of 0.02µV 95% HDI [0.02, 0.03]. We also see that the lab cluster accounted for a substantial amount of the variance in our model. The cluster subject accounts for less, but it is still necessary to have it in the model because we know that this is a true cluster. Not including it will fail to take into account that the data is not IID  (Independent and identically distributed).
+ 
+ 
+# 2: Generalized linear mixed model of lexical data 
+```{r}
+###  Load data
+lg_sh_dat <- read_csv(file.choose()) # choose file long_short_data file
+
+### Look at data
+skim(lg_sh_dat)
+```
+
+## A)
+```{r}
+### Plot of the proportion of short forms picked in each condition (a bit more compact)
+ggplot(lg_sh_dat %>% group_by(Cond) %>% filter(PickedShort == 1), 
+       aes(x = Cond, fill = Cond)) +
+  geom_histogram(stat = "count") +
+  labs(title = "Plot of the proportion of short forms picked in each condition",
+       x = "Condition",
+       y = "Proportion") +
+  theme_bw() +
+  theme(text = element_text(size = 12)) 
+  
+  
+#### 
+ggplot(lg_sh_dat , aes( y = PickedShort)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~Cond, scales = "free") 
+ 
+
+######
+lg_sh_dat %>% count(Cond, PickedShort) %>% filter(PickedShort == 1) %>% 
+  ggplot(aes(x = Cond, y = n, fill = Cond)) +
+  geom_col() +
+  stat_summary(fun = "mean", geom = "pointrange")
+
+# Alternative plotting options:
+  # geom_bar(data = lg_sh_dat, aes(x = Cond), fill = Cond)
+  # geom_errorbar(aes(ymin = mean - 1.96 * sd, ymax = mean + 1.96 * sd))
+  # geom_histogram(aes(y = PickedShort), stat = "count")
+  
+
+lg_sh_dat %>% 
+  group_by(Cond) %>% 
+  mutate(mean_Srt = mean(PickedShort), sd_Srt = sd(PickedShort)) %>% 
+  filter(PickedShort == 1) %>% 
+  mutate(n = n()) %>% 
+  ggplot() +
+  geom_bar( aes(x=Cond, y= n ), stat="identity", fill="skyblue", alpha=0.7) 
+
+# Alternative plotting options:
+  # geom_errorbar(aes(ymin = mean_Srt - 1.96 * sd_Srt, ymax = mean_Srt + 1.96 * sd_Srt))
+  # geom_histogram(stat = "count") + 
+  # geom_point( y = mean_Srt) +
+  # geom_errorbar(aes(ymin = mean_Srt - 1.96 * sd_Srt, ymax = mean_Srt + 1.96 * sd_Srt))
+
+
+### Plot of the proportion of short forms picked in each condition (convoluted way to go about it)
+ggplot(lg_sh_dat %>% 
+         group_by(Cond) %>% # Group by conditions
+         filter(PickedShort == 1), aes(x = Cond)) + # filter appropriate data to plot before starting aesthetic
+  geom_bar(aes(y = ..count.. / sum(..count..), fill = Cond)) + 
+  geom_point(aes(y = PickedShort)) + # Use geom_bar to compute and special ggplot variable to compute proportion
+  labs(title = "Plot of the proportion of short forms picked in each condition",
+       x = "Condition",
+       y = "Proportion") +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+ 
+
+
+# Alternative plotting options: 
+#   geom_errorbar(aes(ymin=n-se, ymax=n+se), width=.1, position=pd)
+#   stat_summary(fun.data = "mean_cl_boot", geom = "linerange") +
+#   geom_errorbar(aes(ymin = n - 1.96 * SD, ymax = n + 1.96 * SD),
+#                 width = 0.2, position = position_dodge(0.9)) + 
+#     ggtitle("Bar plot")
+# 
+# stat_summary(fun.y = "mean_cl_boot", geom = "pointrange", fun.args = list(conf.int = .9999, B=2000))
+```
+
+
+## B)
+```{r}
+# Plot of the difference between the neutral and supportive conditions in the proportion of short forms for each item
+
+```
+
+
+```{r}
+# 
+# ggplot(lg_sh_dat, aes(x= Cond)) +
+#     geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+#     geom_text(aes( label = scales::percent(..prop..),
+#                    y= ..prop.. ), stat= "count", vjust = -.5) +
+#     labs(y = "Percent", fill="day") +
+#     facet_grid(~Cond) +
+#     scale_y_continuous(labels = scales::percent)
+
+```
+
+## C) 
+```{r}
+#### Change variables to factors
+lg_sh_dat_fac <- lg_sh_dat %>% 
+  mutate(Cond = factor(Cond),
+         WorkerId = factor(WorkerId),
+         LongWord = factor(LongWord))
+
+#### Check contrasts
+contrasts(lg_sh_dat_fac$Cond)
+
+#### Change contrasts
+contrasts(lg_sh_dat_fac$Cond) <- c(-0.5,0.5)
+        
+
+#### Use glmer to test hypothesis
+mod <- glmer(PickedShort ~ 1 + Cond + (1 + Cond | WorkerId) + (1 + Cond | LongWord),
+             family = "binomial", 
+             data = lg_sh_dat_fac,
+             # Model did no converge so change optimization procedure being used
+             control = glmerControl(optimizer = "bobyqa", 
+                                    # Change maximum number of iteration
+                                    optCtrl = list(maxfun= 2e5)))
+
+
+### Fit did work so trying with all fit 
+mod <- glmer(PickedShort ~ 1 + Cond + (1 + Cond | WorkerId) + (1 + Cond | LongWord),
+             family = "binomial", 
+             data = lg_sh_dat_fac)
+
+mod_all <- allFit(mod) # Only the 'Nelder_mead' optimizer did not return an error "singularity" message
+summary(mod)$fixef # Retuns, NULL
+
+
+### We will use the Nelder_Mead optimizer
+mod <- glmer(PickedShort ~ 1 + Cond + (1 + Cond | WorkerId) + (1 + Cond | LongWord),
+             family = "binomial", 
+             data = lg_sh_dat_fac,
+             # Model did no converge so change optimization procedure being used
+             control = glmerControl(optimizer = "Nelder_Mead", 
+                                    # Change maximum number of iteration
+                                    optCtrl = list(maxfun= 2e5)))
+### Summary model
+summary(mod)
+
+### Use emmeans to convert log space to probability space
+mod_emm <- emmeans::emmeans(mod, pairwise ~ Cond, type = "response")
+
+mod_emm
+```
+ * The average log odds of picking the short form across conditions is 0.765 (p < 0.01), or the odds of picking the short form across conditions is $exp(0.765) =2.15$ 
+ 
+ * The presence of a supportive context increases the log odds of choosing the short form by 0.728 (p < 0.01), or increases the odds of choosing the short form by $exp(0.728) = 2.071$ *times*. Thus, one is about twice as likely to choose the form in the presence of a supportive context.
+ 
+ 
+```{r}
+#### Comparing our model with the null model
+mod_null <- glmer(PickedShort ~ 1 + (1 + Cond | WorkerId) + (1 + Cond | LongWord),
+             family = "binomial", 
+             data = lg_sh_dat_fac)
+
+### Compare models using performance 
+# compare_performance(mod, mod_null)
+
+### Compare models using anova
+anova(mod, mod_null)
+```
+
+* The Cond predictor contributes significantly to the model
+ 
+ 
+```{r}
+sessionInfo()
+```
+
+ 
+
+
+
+
